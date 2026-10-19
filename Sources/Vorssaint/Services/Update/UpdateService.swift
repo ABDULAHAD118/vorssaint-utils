@@ -28,6 +28,9 @@ final class UpdateService: ObservableObject {
     @Published private(set) var availableNotes: String?
 
     private let repository = "vorssaint/vorssaint-utils"
+    /// Intel fork: upstream releases are Apple Silicon only, so the updater must never
+    /// install them. New builds come from the fork's own GitHub releases instead.
+    private static let updatesDisabled = true
     private var downloadURL: URL?
     /// Size the release advertises for the asset, used to bound the download.
     private var downloadExpectedBytes: Int64?
@@ -110,6 +113,12 @@ final class UpdateService: ObservableObject {
                 state = .upToDate
                 availableNotes = nil
             }
+            lastChecked = Date()
+            return
+        }
+        if Self.updatesDisabled {
+            state = manual ? .failed("Updates are off in this Intel build. Get new versions from github.com/ABDULAHAD118/vorssaint-utils/releases") : .idle
+            availableNotes = nil
             lastChecked = Date()
             return
         }
