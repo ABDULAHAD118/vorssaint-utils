@@ -1,6 +1,6 @@
-name: Universal build
+name: Intel build
 
-# Every push to main builds the universal (Apple Silicon + Intel) app and
+# Every push to main builds the Intel (x86_64) app and
 # publishes the DMG as a GitHub release, so it can be downloaded from Releases.
 on:
   push:
@@ -11,7 +11,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: universal-build
+  group: intel-build
   cancel-in-progress: true
 
 jobs:
@@ -23,11 +23,13 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Build (arm64 + x86_64)
+      - name: Build (x86_64)
         run: ./build.sh
+        env:
+          VORSSAINT_ARCHS: x86_64
 
-      - name: Check both architectures
-        run: lipo build/stage/Vorssaint.app/Contents/MacOS/Vorssaint -verify_arch arm64 x86_64
+      - name: Check Intel architecture
+        run: lipo build/stage/Vorssaint.app/Contents/MacOS/Vorssaint -verify_arch x86_64
 
       - name: Package DMG
         run: ./Tools/make-dmg.sh
@@ -35,7 +37,7 @@ jobs:
       # Downloadable from the run page even if publishing the release fails.
       - uses: actions/upload-artifact@v4
         with:
-          name: Vorssaint-universal
+          name: Vorssaint-intel
           path: dist/*.dmg
 
       - name: Publish release
@@ -46,5 +48,5 @@ jobs:
           tag="build-${GITHUB_RUN_NUMBER}"
           gh release create "$tag" dist/*.dmg \
             --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
-            --title "Universal build $GITHUB_RUN_NUMBER" \
-            --notes "Universal (Apple Silicon + Intel) build of ${GITHUB_SHA::7}. Not notarized: after the first launch, allow it in System Settings → Privacy & Security → Open Anyway."
+            --title "Intel build $GITHUB_RUN_NUMBER" \
+            --notes "Intel (x86_64) build of ${GITHUB_SHA::7}. Not notarized: after the first launch, allow it in System Settings → Privacy & Security → Open Anyway."
