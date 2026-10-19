@@ -32,6 +32,12 @@ jobs:
       - name: Package DMG
         run: ./Tools/make-dmg.sh
 
+      # Downloadable from the run page even if publishing the release fails.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Vorssaint-universal
+          path: dist/*.dmg
+
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -41,4 +47,4 @@ jobs:
           gh release create "$tag" dist/*.dmg \
             --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
             --title "Universal build $GITHUB_RUN_NUMBER" \
-            --notes "Universal (Apple Silicon + Intel) build of ${GITHUB_SHA::7}. Ad-hoc signed: on first launch, right-click the app and choose Open."
+            --notes "Universal (Apple Silicon + Intel) build of ${GITHUB_SHA::7}. Not notarized: after the first launch, allow it in System Settings → Privacy & Security → Open Anyway."
