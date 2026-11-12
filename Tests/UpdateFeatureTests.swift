@@ -13,6 +13,20 @@ import VMStatisticsCompat
 
 enum UpdateFeatureTests {
     static func run(_ suite: TestSuite) {
+        // Intel fork: builds are ordered by the CI run number in the tag.
+        suite.expect(UpdateServiceSupport.forkBuildNumber(tag: "v3.4.4-build.16") == 16, "fork build from new tag")
+        suite.expect(UpdateServiceSupport.forkBuildNumber(tag: "build-15") == 15, "fork build from old tag")
+        suite.expect(UpdateServiceSupport.forkBuildNumber(tag: "v3.4.4") == nil, "upstream tag is not a fork build")
+        func fork(_ tag: String, dmg: Bool = true) -> UpdateServiceSupport.ReleaseCandidate {
+            UpdateServiceSupport.ReleaseCandidate(tagName: tag, isPrerelease: false, isDraft: false,
+                                                  dmgURL: dmg ? URL(string: "https://example.com/a.dmg") : nil,
+                                                  dmgExpectedBytes: nil, body: nil)
+        }
+        let forkReleases = [fork("build-14"), fork("v3.4.4-build.16"), fork("v3.4.4-build.17", dmg: false)]
+        suite.expect(UpdateServiceSupport.selectForkUpdate(from: forkReleases, currentBuild: 15)?.tagName == "v3.4.4-build.16",
+                     "newest fork build with a DMG wins")
+        suite.expect(UpdateServiceSupport.selectForkUpdate(from: forkReleases, currentBuild: 16) == nil,
+                     "no update when already on the newest build")
         suite.expect(BrightnessUpdatePromptInfo.isUpgrade(appVersion: "3.4.0-beta.7",
                                                           previousVersion: "3.4.0-beta.6")
                     && BrightnessUpdatePromptInfo.isUpgrade(appVersion: "3.4.0",

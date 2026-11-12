@@ -146,6 +146,22 @@ enum UpdateServiceSupport {
     }
 
     /// Selects the best update candidate from a list of releases based on channel preferences.
+    /// Intel fork: the CI run number in a release tag, from "v3.4.4-build.16" or the
+    /// older "build-15". Every fork build shares upstream's version, so this orders them.
+    static func forkBuildNumber(tag: String) -> Int? {
+        guard let range = tag.range(of: #"build[-.]\d+$"#, options: .regularExpression) else { return nil }
+        return Int(tag[range].dropFirst(6))
+    }
+
+    /// Intel fork: the newest published build with a DMG that is newer than `currentBuild`.
+    static func selectForkUpdate(from candidates: [ReleaseCandidate], currentBuild: Int) -> ReleaseCandidate? {
+        candidates
+            .filter { !$0.isDraft && $0.dmgURL != nil }
+            .compactMap { c in forkBuildNumber(tag: c.tagName).map { (c, $0) } }
+            .filter { $0.1 > currentBuild }
+            .max { $0.1 < $1.1 }?.0
+    }
+
     static func selectUpdate(from candidates: [ReleaseCandidate],
                              currentVersion: String,
                              includeBetas: Bool) -> ReleaseCandidate? {

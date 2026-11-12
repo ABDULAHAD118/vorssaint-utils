@@ -22,11 +22,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+          fetch-depth: 0 # the release notes list commits since the previous build
 
       - name: Build (x86_64)
         run: ./build.sh
         env:
           VORSSAINT_ARCHS: x86_64
+          VORSSAINT_FORK_BUILD: ${{ github.run_number }}
 
       - name: Check Intel architecture
         run: lipo build/stage/Vorssaint.app/Contents/MacOS/Vorssaint -verify_arch x86_64
@@ -45,8 +47,23 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          tag="build-${GITHUB_RUN_NUMBER}"
+          version="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' build/stage/Vorssaint.app/Contents/Info.plist)"
+          tag="v${version}-build.${GITHUB_RUN_NUMBER}"
+          prev="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 1 --json tagName -q '.[0].tagName' || true)"
+          # Strip @ from handles: a release body would notify every upstream contributor.
+          unmention() { sed -E 's/(^|[^[:alnum:]_])@([[:alnum:]-]+)/\1\2/g'; }
+          {
+            echo "Intel (x86_64) build of ${GITHUB_SHA::7}. Not notarized: after the first launch, allow it in System Settings → Privacy & Security → Open Anyway."
+            echo
+            # The Unreleased section when it has entries, then the newest release's.
+            awk '/^## \[/{n++} n==1{u=u $0 "\n"; if(!/^## \[/ && /[^[:space:]]/) b=1; next} n==2{if(b){printf "%s",u; b=0} print} n>2{exit}' CHANGELOG.md | unmention
+            if [[ -n "$prev" ]] && git rev-parse -q --verify "refs/tags/$prev" >/dev/null; then
+              echo
+              echo "## Commits since $prev"
+              git log --no-merges --format='- %s' "$prev..HEAD" | head -60 | unmention
+            fi
+          } > notes.md
           gh release create "$tag" dist/*.dmg \
             --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
-            --title "Intel build $GITHUB_RUN_NUMBER" \
-            --notes "Intel (x86_64) build of ${GITHUB_SHA::7}. Not notarized: after the first launch, allow it in System Settings → Privacy & Security → Open Anyway."
+            --title "Vorssaint $version (Intel build $GITHUB_RUN_NUMBER)" \
+            --notes-file notes.md

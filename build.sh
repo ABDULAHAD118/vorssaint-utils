@@ -785,6 +785,10 @@ if [[ -d Resources/Images ]]; then
     mkdir -p "$STAGE/Contents/Resources/Images"
     cp Resources/Images/* "$STAGE/Contents/Resources/Images/"
 fi
+# Intel fork: CI stamps its run number so the updater can order fork builds.
+if [[ -n "${VORSSAINT_FORK_BUILD:-}" ]]; then
+    /usr/libexec/PlistBuddy -c "Add :VorssaintForkBuild integer $VORSSAINT_FORK_BUILD" "$STAGE/Contents/Info.plist"
+fi
 xattr -c -r "$STAGE" 2>/dev/null || true
 
 # Signing, in order of preference:

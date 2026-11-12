@@ -27,10 +27,10 @@ final class UpdateService: ObservableObject {
     /// preview. Set alongside `.available`; cleared otherwise.
     @Published private(set) var availableNotes: String?
 
-    private let repository = "vorssaint/vorssaint-utils"
-    /// Intel fork: upstream releases are Apple Silicon only, so the updater must never
-    /// install them. New builds come from the fork's own GitHub releases instead.
-    private static let updatesDisabled = true
+    /// Intel fork: upstream releases are Apple Silicon only, so updates come from the
+    /// fork's own releases. Those are not Developer ID signed, so the installer's
+    /// signature check would refuse them: the DMG is opened for the user to install.
+    private let repository = "ABDULAHAD118/vorssaint-utils"
     private var downloadURL: URL?
     /// Size the release advertises for the asset, used to bound the download.
     private var downloadExpectedBytes: Int64?
@@ -116,12 +116,6 @@ final class UpdateService: ObservableObject {
             lastChecked = Date()
             return
         }
-        if Self.updatesDisabled {
-            state = manual ? .failed("Updates are off in this Intel build. Get new versions from github.com/ABDULAHAD118/vorssaint-utils/releases") : .idle
-            availableNotes = nil
-            lastChecked = Date()
-            return
-        }
         if case .checking = state { return }
         if case .downloading = state { return }
         if case .installing = state { return }
@@ -173,10 +167,9 @@ final class UpdateService: ObservableObject {
                     )
                 }
 
-                if let chosen = UpdateServiceSupport.selectUpdate(
+                if let chosen = UpdateServiceSupport.selectForkUpdate(
                     from: candidates,
-                    currentVersion: AppInfo.version,
-                    includeBetas: self.includeBetaUpdates
+                    currentBuild: AppInfo.forkBuild
                 ) {
                     let versionClean = chosen.tagName.trimmingCharacters(in: CharacterSet(charactersIn: "vV "))
                     self.downloadURL = chosen.dmgURL
@@ -298,8 +291,10 @@ final class UpdateService: ObservableObject {
                         return
                     }
                     DispatchQueue.main.async {
-                        self.state = .installing
-                        self.launchInstaller(dmgPath: dmgURL.path, offered: offered)
+                        // Intel fork: unsigned builds cannot pass launchInstaller's
+                        // signature check, so the user drags the app from the DMG.
+                        NSWorkspace.shared.open(dmgURL)
+                        self.state = offered.map { State.available(version: $0) } ?? .idle
                     }
                 })
         } catch {

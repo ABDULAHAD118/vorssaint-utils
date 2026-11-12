@@ -19,6 +19,12 @@ enum AppInfo {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
     }
 
+    /// Intel fork: the CI run that built this app (build.sh stamps VORSSAINT_FORK_BUILD).
+    /// 0 for a local build, so any published fork build counts as newer.
+    static var forkBuild: Int {
+        Bundle.main.object(forInfoDictionaryKey: "VorssaintForkBuild") as? Int ?? 0
+    }
+
     /// True for the local "Vorssaint (Developer)" build (bundle id ends in `.dev`).
     /// It is never published and never auto-updates; all work is tested here first.
     static var isDeveloperBuild: Bool {
