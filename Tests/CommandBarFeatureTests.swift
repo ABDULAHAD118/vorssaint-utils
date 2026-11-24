@@ -168,6 +168,7 @@ enum CommandBarFeatureTests {
     }
 
     static func run(_ suite: TestSuite) {
+        CommandBarMicMuteTests.run(suite)
         CommandBarInputSourceContract.run(suite)
         CommandBarTerminationContract.run(suite)
         CommandBarAppSortContract.run(suite)
@@ -1510,6 +1511,18 @@ enum CommandBarFeatureTests {
         for connector in ["to", "in", "into", "as", "em", "para", "pra", "en", "a",
                           "nach", "zu", "à", "su", "->", ">", "→"] {
             suite.expect(unitValue("2 kg \(connector) g") == 2000, "conversion through \(connector)")
+            suite.expect(unitValue("2 KG \(connector.uppercased()) G") == 2000,
+                         "uppercase conversion through \(connector.uppercased())")
+        }
+        suite.expect(unitValue("2 A A mA") == 2000 && unitValue("2 mA A A") == 0.002,
+                     "A is an ampere at either end and a connector between units")
+        suite.expect(unitValue("2A in mA") == 2000, "A attached to the source number means amperes")
+        for query in ["5 ft 11 in A cm", "5 ft 11 A cm"] {
+            suite.expect(unitValue(query) == 180.34, "\(query) converts feet and inches to centimeters")
+        }
+        suite.expect(unitValue("1 kg 2 A g") == 1002, "a spaced A converts kilograms and grams")
+        for query in ["2 kg ampere g", "2 KG A m", "5 ft 12 A cm", "5 ft 11A cm", "1 kg 2A g"] {
+            suite.expect(calculate(query) == nil, "\(query) stays a search")
         }
         for query in ["1 cm + 1", "1 kg + 1 m", "1 kg / 1 m * 1 s * 1 s to Pa",
                       "20 °C * 2", "1 kg in 2 kg", "20 ms to Hz", "1 / 0 ms to Hz"] {
@@ -1550,6 +1563,25 @@ enum CommandBarFeatureTests {
         expectSplit("100 days to weeks and days", [14, 2], units: ["wk", "d"])
         expectSplit("1m", [3, 3.370_078_74], units: ["ft", "in"])
         expectSplit("1hr", [60], units: ["min"])
+
+        for (input, whole) in [
+            ("7 ft to feet and inches", "7 ft to ft"),
+            ("-7 ft to feet and inches", "-7 ft to ft"),
+            ("53 ft to feet and inches", "53 ft to ft"),
+            ("-53 ft to feet and inches", "-53 ft to ft"),
+            ("6.9999999999 ft to feet and inches", "7 ft to ft"),
+            ("-0.99999999999 h to hours and minutes", "-1 h to h"),
+        ] {
+            let shown = units(input)
+            suite.expect(shown != nil && shown == units(whole),
+                         "\(input) should match \(whole), got \(shown ?? "nil")")
+        }
+        expectSplit("6.99999998 ft to feet and inches", [6, 11.99999976], units: ["ft", "in"])
+        expectSplit("7 1/32 ft to feet and inches", [7, 0.375], units: ["ft", "in"])
+        let tinyRemainder = calculatorNumbers(units("53.000000000000014 ft to feet and inches"))
+        suite.expect(tinyRemainder.count == 2 && tinyRemainder[0] == 53
+                     && (1e-13...2e-13).contains(tinyRemainder[1]),
+                     "one representable SI step above 53 feet keeps its fractional inches")
 
         suite.expect(unitValue("100 km to mi").map { abs($0 - 62.1371) < 0.001 } == true,
                "a distance converts")

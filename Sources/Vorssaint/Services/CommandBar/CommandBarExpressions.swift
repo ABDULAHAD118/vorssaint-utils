@@ -245,10 +245,19 @@ enum CommandBarExpressions {
             guard let next = readUnit(at: p) else { return false }
             // In "5 ft 11 in in cm" the second "in" introduces a target.
             // In "5 ft 11 in in" that same word is the target (inches).
-            if asConversionTarget, next.raw != "A", conversionWords.contains(fold(next.raw)) {
+            if asConversionTarget, conversionWords.contains(fold(next.raw)) {
                 return !unitAhead(at: next.end, asConversionTarget: true)
             }
             return true
+        }
+
+        func followsUnitOrMixedRemainder(at start: Int) -> Bool {
+            if case .unit? = tokens.last { return true }
+            // "5 ft 11 A cm" omits inches. In "11A", the A belongs to the number.
+            guard start > 0, characters[start - 1].isWhitespace,
+                  case .number? = tokens.last, case .unit(let larger)? = tokens.dropLast().last
+            else { return false }
+            return CommandBarUnitCatalog.mixedPairs[larger.id] != nil
         }
 
         // A detached negative inch remainder is invalid (5ft -1in). A binary
@@ -367,8 +376,8 @@ enum CommandBarExpressions {
                             continue
                         }
                     }
-                    if matched.unit.id == "a", matched.raw != "A",
-                       case .unit? = tokens.last, unitAhead(at: index) {
+                    if matched.unit.id == "a", fold(matched.raw) == "a",
+                       followsUnitOrMixedRemainder(at: tokenStart), unitAhead(at: index) {
                         tokens.append(.to)
                         continue
                     }
@@ -1201,8 +1210,8 @@ enum CommandBarExpressions {
                          percentRaw: value.percentRaw.map { -$0 }, hasNumber: value.hasNumber)
         }
 
-        private func displayValue(_ value: Value) -> Double {
-            guard let unit = value.unit else { return value.si }
+        private func displayValue(_ value: Value, in target: CommandBarUnitCatalog.Unit? = nil) -> Double {
+            guard let unit = target ?? value.unit else { return value.si }
             let displayed = unit.displayValue(siValue: value.si)
             // An integral reading can gain a fractional bit on its return trip
             // from SI. Keep floor(29 cm) at 29 when that integer maps to the same SI value.
@@ -1245,7 +1254,7 @@ enum CommandBarExpressions {
                            larger: CommandBarUnitCatalog.Unit,
                            smaller: CommandBarUnitCatalog.Unit) -> Outcome? {
             guard value.dims == larger.dimensions, larger.dimensions == smaller.dimensions else { return nil }
-            let largerTotal = (value.si - larger.offset) / larger.scale
+            let largerTotal = displayValue(value, in: larger)
             let whole = largerTotal >= 0 ? largerTotal.rounded(.down) : largerTotal.rounded(.up)
             let remainderLarger = largerTotal - whole
             let smallerValue = remainderLarger * larger.scale / smaller.scale
