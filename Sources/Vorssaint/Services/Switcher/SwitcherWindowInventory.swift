@@ -16,11 +16,49 @@ struct SwitcherInventorySpaces {
 }
 
 final class SwitcherWindowInventory {
+    /// Group selection can finish before the source app's announced windows arrive.
+    /// Keep the history entry addressable until those particular discoveries finish.
+    final class GroupedSource {
+        let request: WindowFocusHistory.Request
+        let representative: SwitcherItem
+        fileprivate(set) var confirmed: SwitcherItem?
+        fileprivate var observedWindowID: CGWindowID?
+        fileprivate var discoveries: [UUID: CGWindowID]
+        var awaitsDiscovery: Bool { !discoveries.isEmpty }
+        var pendingRequest: WindowFocusHistory.Request? { awaitsDiscovery || observedWindowID != nil ? request : nil }
+
+        fileprivate init(representative: SwitcherItem, frontmostPID: pid_t, discoveries: [UUID: CGWindowID]) {
+            request = .init(pid: representative.pid, focusPID: frontmostPID)
+            self.representative = representative
+            self.discoveries = discoveries
+        }
+
+        fileprivate func confirm(in items: [SwitcherItem], axFocus: CGWindowID?, tickets: Set<UUID>) {
+            let discoveredFocus = axFocus.flatMap { id in tickets.contains { discoveries[$0] == id } ? id : nil }
+            for id in [observedWindowID, discoveredFocus].compactMap({ $0 }) {
+                guard let focus = items.first(where: {
+                    $0.windowID == id && $0.pid == request.pid && $0.isOnScreen && !$0.isMinimized
+                }), let previous = representative.windowID else { continue }
+                WindowUseTracker.shared.confirmSwitchSource(id, replacing: previous, for: request)
+                confirmed = focus
+                observedWindowID = nil
+                discoveries = [:]
+                return
+            }
+        }
+    }
+
     private struct EmptySelectionRefresh: Equatable {
         let generation: UInt64
         let isFollowup: Bool
         var discoveries: Set<CGWindowID>
         var completed = false
+    }
+
+    private struct FocusProbe: Equatable {
+        let frontmostPID: pid_t
+        let confirmation: UUID
+        let spaceRevision: Int
     }
 
     private var remembered = WindowEnumerator.WindowList(items: [], sourceItems: [])
@@ -36,6 +74,9 @@ final class SwitcherWindowInventory {
     private var pendingPIDs: Set<pid_t> = []
     private var pendingWindowIDs: [CGWindowID: UUID] = [:]
     private var discoveriesForRefresh: [UUID: CGWindowID] = [:]
+    private var unlistedFocus: (ticket: UUID, frontmostPID: pid_t, observation: UUID?)?
+    private var lastFocusProbe: FocusProbe?
+    private var groupedSources: [pid_t: GroupedSource] = [:]
     private var discoveryWait: (tickets: Set<UUID>, isPending: () -> Bool, resume: () -> Void)?
     private var destroyedDuringRefresh: Set<CGWindowID> = []
     private var terminatedDuringRefresh: Set<pid_t> = []
@@ -87,6 +128,10 @@ final class SwitcherWindowInventory {
                     if name == NSWorkspace.didTerminateApplicationNotification {
                         self.remove(pid: app.processIdentifier)
                     }
+                    if name == NSWorkspace.didActivateApplicationNotification {
+                        self.unlistedFocus = nil
+                        self.groupedSources.removeValue(forKey: app.processIdentifier)
+                    }
                     self.invalidate(pid: app.processIdentifier)
                 } else if name == NSWorkspace.activeSpaceDidChangeNotification {
                     self.checkSpaces(notified: true)
@@ -134,6 +179,9 @@ final class SwitcherWindowInventory {
         pendingPIDs = []
         pendingWindowIDs = [:]
         discoveriesForRefresh = [:]
+        unlistedFocus = nil
+        lastFocusProbe = nil
+        groupedSources = [:]
         discoveryWait = nil
         for observer in observers { NSWorkspace.shared.notificationCenter.removeObserver(observer) }
         observers = []
@@ -194,10 +242,50 @@ final class SwitcherWindowInventory {
 
     var currentSpaceRevision: Int { spaces.revision }
 
-    /// Wait only for windows already announced at the key press. A later announcement
-    /// (even for the same ID) belongs to its own discovery and cannot extend this wait.
+    func groupedSource(frontmostPID: pid_t, representative: SwitcherItem) -> GroupedSource? {
+        guard let fallback = representative.windowID else { return nil }
+        let tracker = WindowUseTracker.shared
+        let hasDiscovery = !pendingWindowIDs.isEmpty || !discoveriesForRefresh.isEmpty
+        guard hasDiscovery || tracker.windows.first != fallback else { return nil }
+        var discoveries = discoveriesForRefresh
+        for (id, ticket) in pendingWindowIDs { discoveries[ticket] = id }
+        let focus = tracker.frontAppFocus(for: frontmostPID, appPID: representative.pid)
+        let source = GroupedSource(representative: representative, frontmostPID: frontmostPID, discoveries: discoveries)
+        if let unlistedFocus, unlistedFocus.frontmostPID == frontmostPID,
+           focus.latest?.confirmation == unlistedFocus.observation {
+            source.observedWindowID = discoveries[unlistedFocus.ticket]
+        } else if let observed = focus.latest, observed.wasObserved, observed.windowID != fallback,
+                  focus.windowID == observed.windowID || discoveries.values.contains(observed.windowID) {
+            // An unrelated discovery can still be pending when AX has already observed the source.
+            source.observedWindowID = observed.windowID
+        }
+        guard source.pendingRequest != nil else { return nil }
+        // onReady can open the session inside the scan that first lists the source.
+        source.confirm(in: remembered.items, axFocus: remembered.focusedWindowIDsByOwner[frontmostPID],
+                       tickets: Set(discoveriesForRefresh.keys))
+        if source.pendingRequest != nil { groupedSources[frontmostPID] = source }
+        return source
+    }
+
+    /// Wait only for discoveries known at the key press, including a window AX
+    /// has already observed. Later notifications cannot extend this wait.
     func afterAnnouncedWindows(frontmostPID: pid_t, isPending: @escaping () -> Bool,
                                resume: @escaping (_ needsFocus: Bool) -> Void) -> Bool {
+        // onReady will retry against the first snapshot if there is no discovery to wait for yet.
+        guard isReady || !pendingWindowIDs.isEmpty || !discoveriesForRefresh.isEmpty else { return false }
+        let appPID = remembered.items.first { $0.windowOwnerPID == frontmostPID || $0.pid == frontmostPID }?.pid
+        let focus = WindowUseTracker.shared.frontAppFocus(for: frontmostPID, appPID: appPID)
+        if let observed = focus.latest, observed.wasObserved,
+           !remembered.items.contains(where: { $0.windowID == observed.windowID }),
+           pendingWindowIDs[observed.windowID] == nil, !discoveriesForRefresh.values.contains(observed.windowID) {
+            // An excluded inspector can remain focused across shortcut presses.
+            let probe = FocusProbe(frontmostPID: frontmostPID, confirmation: observed.confirmation, spaceRevision: spaces.revision)
+            if lastFocusProbe != probe {
+                lastFocusProbe = probe
+                discoveriesForRefresh[UUID()] = observed.windowID
+                invalidate(pid: appPID)
+            }
+        }
         guard !pendingWindowIDs.isEmpty || !discoveriesForRefresh.isEmpty else { return false }
         let ids = Set(pendingWindowIDs.keys).union(discoveriesForRefresh.values)
         let tickets = Set(pendingWindowIDs.values).union(discoveriesForRefresh.keys)
@@ -215,6 +303,11 @@ final class SwitcherWindowInventory {
     }
 
     private func finishDiscoveries(_ tickets: Set<UUID>) {
+        if let focus = unlistedFocus, tickets.contains(focus.ticket) { unlistedFocus = nil }
+        for (pid, source) in groupedSources {
+            for ticket in tickets { source.discoveries.removeValue(forKey: ticket) }
+            if source.pendingRequest == nil { groupedSources.removeValue(forKey: pid) }
+        }
         guard var wait = discoveryWait else { return }
         wait.tickets.subtract(tickets)
         if wait.tickets.isEmpty {
@@ -268,6 +361,7 @@ final class SwitcherWindowInventory {
             return
         case .destroyed(let id):
             WindowUseTracker.shared.recordDestroyedWindow(id)
+            for source in groupedSources.values where source.observedWindowID == id { source.observedWindowID = nil }
             onRemoval?(.window(id))
             windowID = id
         case .changed(let id), .focused(let id):
@@ -279,12 +373,17 @@ final class SwitcherWindowInventory {
         let item = remembered.items.first { $0.windowID == windowID }
         switch event {
         case .focused:
+            unlistedFocus = nil
             if let item,
                let frontPID = NSWorkspace.shared.frontmostApplication?.processIdentifier,
                item.pid == frontPID || item.windowOwnerPID == frontPID {
                 WindowUseTracker.shared.recordObservedFocus(windowID: windowID, pid: frontPID)
             } else if item == nil {
                 discover(windowID)
+                if let ticket = pendingWindowIDs[windowID],
+                   let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier {
+                    unlistedFocus = (ticket, pid, WindowUseTracker.shared.frontAppFocus(for: pid).latest?.confirmation)
+                }
             }
         case .destroyed:
             destroyedDuringRefresh.insert(windowID)
@@ -328,6 +427,7 @@ final class SwitcherWindowInventory {
     }
 
     private func remove(pid: pid_t) {
+        groupedSources = groupedSources.filter { !$0.value.request.involves(pid) }
         onRemoval?(.process(pid))
         terminatedDuringRefresh.insert(pid)
         recordTerminatedWindows(of: pid, in: remembered)
@@ -389,6 +489,7 @@ final class SwitcherWindowInventory {
                     combined.nativeFullscreenWindowIDs.formUnion(part.nativeFullscreenWindowIDs)
                     combined.observedWindowIDs.formUnion(part.observedWindowIDs)
                     combined.accessibilityElements.merge(part.accessibilityElements) { _, new in new }
+                    combined.focusedWindowIDsByOwner.merge(part.focusedWindowIDsByOwner) { _, new in new }
                     combined.activationSnapshot = part.activationSnapshot
                 }
                 result = combined
@@ -408,7 +509,7 @@ final class SwitcherWindowInventory {
                     self.emptySelectionRefresh?.completed = true
                 }
                 // onReady can be the shortcut's first turn on main, before its queued key handler.
-                self.adopt(result, replacing: pids)
+                self.adopt(result, replacing: pids, discoveries: discoveries)
                 for ticket in discoveries { self.discoveriesForRefresh.removeValue(forKey: ticket) }
                 self.finishDiscoveries(discoveries)
                 if self.needsFullRefresh || !self.pendingPIDs.isEmpty { self.invalidatePendingRefresh() }
@@ -436,7 +537,7 @@ final class SwitcherWindowInventory {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
     }
 
-    private func adopt(_ result: WindowEnumerator.WindowList, replacing pids: Set<pid_t>?) {
+    private func adopt(_ result: WindowEnumerator.WindowList, replacing pids: Set<pid_t>?, discoveries: Set<UUID>) {
         var updated = result
         updated.items.removeAll { item in
             terminatedDuringRefresh.contains(item.pid) || terminatedDuringRefresh.contains(item.windowOwnerPID)
@@ -454,6 +555,14 @@ final class SwitcherWindowInventory {
         }
         let currentIDs = Set(updated.items.compactMap(\.windowID))
         updated.accessibilityElements = updated.accessibilityElements.filter { currentIDs.contains($0.key) }
+        updated.focusedWindowIDsByOwner = updated.focusedWindowIDsByOwner.filter { currentIDs.contains($0.value) }
+        for (pid, source) in groupedSources {
+            source.confirm(in: refreshedItems, axFocus: updated.focusedWindowIDsByOwner[pid], tickets: discoveries)
+            if let observed = source.observedWindowID, pids?.contains(source.request.pid) != false,
+               result.observedWindowIDs.contains(observed) || discoveries.contains(where: { source.discoveries[$0] == observed }) {
+                source.observedWindowID = nil
+            }
+        }
         remembered = updated
         let watching = SwitcherWindowEvents.shared.watch(updated.observedWindowIDs.subtracting(destroyedDuringRefresh))
         setFallbackPolling(!observesWindowEvents || !watching)
